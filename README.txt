@@ -328,7 +328,84 @@ widely.
 
 
 ------------------------------------------------------------------------------
-8. KNOWN ISSUES
+8. THE TCP/NETWORK-API WRITE-TIMING TRAP (reads work, writes silently vanish)
+------------------------------------------------------------------------------
+
+Found in the field on a device that had been running a while and had
+accumulated 70+ nodes in its NodeDB. Symptom, over the Ethernet/TCP API
+(`meshtastic --host <ip> ...`) specifically:
+
+  - `--info` and other reads work perfectly, every time.
+  - `--ch-add`, `--set`, `--seturl` etc. all APPEAR to succeed from the
+    CLI's point of view ("Writing modified channels to device" prints,
+    no Python exception) -- but nothing is actually changed. Reconnect
+    and the channel list / config field / whatever you wrote is back to
+    its old value. No reboot happens (rebootCount does not increment),
+    so the device is not crashing or resetting -- the write simply never
+    reaches the point where it gets applied.
+  - The exact same commands, over USB serial, on the exact same device,
+    work immediately and persist.
+
+Root cause, confirmed by capturing the device's live debug log (over USB,
+with `security.debug_log_api_enabled` turned on) while reproducing the
+problem from a second, simultaneous TCP connection: on every new client
+connection -- TCP or serial -- Meshtastic replays its ENTIRE cached
+position/telemetry/environment/status history for every known node
+("Begin position replay: N entries", etc.) before it gets to processing
+anything else the client sent. On a device with a lot of mesh history
+(70+ nodes in this case: 43 position + 26 telemetry + 3 status replay
+entries), that replay takes noticeably longer over the Ethernet/TCP path
+than it does over USB serial's much higher effective throughput for this
+exchange. The Meshtastic Python CLI connects, fires off its write, and
+disconnects -- all in one short-lived session, sized for how fast that
+round-trip normally is over USB/BLE. Over a busy device's TCP connection,
+the client disconnects before the server has worked through the replay
+backlog and actually reached the client's write packet. The device's own
+log confirms this in so many words:
+
+  Incoming ethernet connection
+  Client wants config, nonce=...
+  Begin position replay: 43 entries ...
+  ...
+  TCP client disconnected before write, closing API service
+
+This is NOT specific to this Ethernet patch, not a security/admin-trust
+issue (there is no code path that treats TCP writes differently from
+serial writes -- see PhoneAPI.cpp's api_type handling, TYPE_ETH and
+TYPE_SERIAL are dispatched symmetrically), and not a W5100S/RAK13800
+library bug. It is a client-timing issue that gets worse the longer a
+device has been running and accumulating NodeDB history, and it is far
+more likely to bite a TCP-connected client than a USB one simply because
+TCP-over-W5100S is the slower path of the two for this particular
+exchange.
+
+CONFIRMED WORKAROUND: don't use the bare one-shot `meshtastic --host ...`
+CLI invocation for writes once a device has a non-trivial NodeDB. Instead
+open the connection yourself (Python `meshtastic.tcp_interface.TCPInterface`)
+and add explicit delays: wait ~10 seconds after connecting (let the replay
+drain) before sending your write, and wait another ~10-15 seconds after
+the write before closing the connection (give the device time to actually
+reach and process it). Example that reproducibly works:
+
+  import time
+  import meshtastic.tcp_interface
+  iface = meshtastic.tcp_interface.TCPInterface(hostname="192.168.5.158")
+  time.sleep(10)
+  node = iface.getNode('^local')
+  node.localConfig.lora.tx_power = 25
+  node.writeConfig("lora")
+  time.sleep(15)
+  iface.close()
+
+Or simpler: do config writes over USB serial (fast, no replay-backlog
+contention) and reserve the TCP/Ethernet API for reading/monitoring
+(exactly what MeshMonitor uses it for) -- the same division of labor this
+patch's own README section 3/7 workarounds already land on for other
+reasons.
+
+
+------------------------------------------------------------------------------
+9. KNOWN ISSUES
 ------------------------------------------------------------------------------
 
   - STATIC IP MODE IS BROKEN. Setting `network.address_mode` to STATIC and
@@ -363,7 +440,7 @@ widely.
 
 
 ------------------------------------------------------------------------------
-9. HOW TO REBUILD THIS YOURSELF
+10. HOW TO REBUILD THIS YOURSELF
 ------------------------------------------------------------------------------
 
   git clone https://github.com/meshtastic/firmware meshtastic-firmware
@@ -403,7 +480,7 @@ Notes if you hit problems:
 
 
 ------------------------------------------------------------------------------
-10. WHY THIS ISN'T JUST A PULL REQUEST YET
+11. WHY THIS ISN'T JUST A PULL REQUEST YET
 ------------------------------------------------------------------------------
 
 Several reasons someone should sanity-check before upstreaming this:
@@ -415,13 +492,19 @@ Several reasons someone should sanity-check before upstreaming this:
   - The config-persistence regression in section 6 is a separate, real
     upstream bug that someone should properly root-cause and report
     independently of this Ethernet work.
-  - The static-IP bug in section 8 needs someone to actually dig into the
+  - The static-IP bug in section 9 needs someone to actually dig into the
     RAK13800-W5100S library's source rather than work around it.
-  - This was developed and tested on exactly one physical device. Full
-    functionality was confirmed both with USB and PoE connected at the
-    same time and powered solely by the RAK19018 PoE module over the
-    Ethernet cable (no USB connected). It has not been tested across
-    multiple units, power-cycle counts, or long-term uptime.
+  - This was developed and tested on exactly one physical device. UPDATE:
+    PoE power delivery has since been confirmed working -- the device runs
+    correctly both with USB and PoE connected simultaneously, and powered
+    solely via the RAK19018 PoE module with no USB connected at all. Still
+    not tested across multiple units, power-cycle counts, or long-term
+    uptime.
+  - See section 8 for a client-timing gotcha (writes over the TCP/Ethernet
+    API can silently fail to land once a device has a large NodeDB) found
+    during real-world use after publishing this. Not a bug in this patch,
+    but worth upstream awareness since it will affect any sufficiently
+    busy Ethernet- or WiFi-connected node, not just this board.
 
 Test it, poke at the known issues, and feel free to open this as a PR
 against meshtastic/firmware yourself -- just please mention the above so
