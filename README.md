@@ -49,10 +49,25 @@ meshtastic --port COM4 --set lora.region EU_868
 
 Upstream discussion: [meshtastic/firmware#12190](https://github.com/meshtastic/firmware/issues/12190)
 
+## Status
+
+Confirmed working: DHCP, link detection, the TCP API on port 4403, NTP.
+Confirmed working powered **solely via the RAK19018 PoE module** (no USB
+connected), and with USB + PoE connected simultaneously.
+
+## Known issues (quick list -- see README.txt for detail)
+
+| # | Issue | Workaround |
+| --- | --- | --- |
+| 1 | First-ever `lora.region` change (from UNSET) mid-settings-transaction can silently fail to save | Set region alone, outside any transaction, first (README.txt §7) |
+| 2 | On `develop` (not v2.7.26), config writes have been observed to not persist, unrelated to this patch | Full chip erase before first config write; not fixed by this patch (README.txt §6) |
+| 3 | Static IP (`network.address_mode = STATIC`) comes up as `0.0.0.0` -- looks like a RAK13800-W5100S library bug | Use DHCP + a router-side DHCP reservation instead (README.txt §9) |
+| 4 | Config writes over the TCP/Ethernet API can silently fail to land once a device has a large NodeDB (client disconnects before the server works through its position/telemetry replay backlog) | Write config over USB, or add explicit delays around the write if scripting over TCP (README.txt §8) |
+
 ## Details
 
 See **[README.txt](README.txt)** for the pin mapping, every code change and why,
-the two upstream bugs found along the way (with workarounds), known issues and
+all four issues above in full (with workarounds and root causes), and
 rebuild instructions.
 
 ## License
