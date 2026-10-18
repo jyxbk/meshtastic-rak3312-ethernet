@@ -1,5 +1,9 @@
 # Meshtastic Ethernet/PoE support for RAK3312
 
+**Patch set version: v1.1.0** — see [CHANGELOG.md](CHANGELOG.md). (This
+versions the patch/docs in this repo, not the upstream Meshtastic build,
+which stays `2.8.2.fad52bb` until the base is rebased to a newer commit.)
+
 Unofficial community patch that adds working Ethernet/PoE support to the
 Meshtastic `rak3312` board target (ESP32-S3 WisBlock core), which has none
 upstream. For anyone running a RAK3312-based "Meshtastic Gateway" kit who wants
