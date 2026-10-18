@@ -417,10 +417,11 @@ Several reasons someone should sanity-check before upstreaming this:
     independently of this Ethernet work.
   - The static-IP bug in section 8 needs someone to actually dig into the
     RAK13800-W5100S library's source rather than work around it.
-  - This was developed and tested on exactly one physical device. It
-    works both USB-powered and powered solely by the RAK19018 PoE module
-    over the Ethernet cable (no USB connected). It has not been tested
-    across multiple units, power-cycle counts, or long-term uptime.
+  - This was developed and tested on exactly one physical device. Full
+    functionality was confirmed both with USB and PoE connected at the
+    same time and powered solely by the RAK19018 PoE module over the
+    Ethernet cable (no USB connected). It has not been tested across
+    multiple units, power-cycle counts, or long-term uptime.
 
 Test it, poke at the known issues, and feel free to open this as a PR
 against meshtastic/firmware yourself -- just please mention the above so
