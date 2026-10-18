@@ -1,0 +1,227 @@
+﻿diff --git a/src/mesh/api/ethServerAPI.cpp b/src/mesh/api/ethServerAPI.cpp
+index 953c992..b68f0aa 100644
+--- a/src/mesh/api/ethServerAPI.cpp
++++ b/src/mesh/api/ethServerAPI.cpp
+@@ -7,7 +7,7 @@
+ 
+ static std::unique_ptr<ethServerPort> apiPort;
+ 
+-void initApiServer(int port)
++void initEthSocketApiServer(int port)
+ {
+     // Start API server on port 4403
+     if (!apiPort) {
+@@ -17,7 +17,7 @@ void initApiServer(int port)
+     }
+ }
+ 
+-void deInitApiServer()
++void deInitEthSocketApiServer()
+ {
+     if (apiPort) {
+         LOG_INFO("Deinit API server");
+diff --git a/src/mesh/api/ethServerAPI.h b/src/mesh/api/ethServerAPI.h
+index 5e7129a..b793d9a 100644
+--- a/src/mesh/api/ethServerAPI.h
++++ b/src/mesh/api/ethServerAPI.h
+@@ -27,6 +27,9 @@ class ethServerPort : public APIServerPort<ethServerAPI, EthernetServer>
+     explicit ethServerPort(int port);
+ };
+ 
+-void initApiServer(int port = SERVER_API_DEFAULT_PORT);
+-void deInitApiServer();
++// Named distinctly from WiFiServerAPI's initApiServer()/deInitApiServer(): boards with
++// both HAS_WIFI and HAS_ETHERNET link both files, and identically-named globals/functions
++// in each would collide at link time.
++void initEthSocketApiServer(int port = SERVER_API_DEFAULT_PORT);
++void deInitEthSocketApiServer();
+ #endif
+diff --git a/src/mesh/eth/ethClient.cpp b/src/mesh/eth/ethClient.cpp
+index ce26923..e2aada8 100644
+--- a/src/mesh/eth/ethClient.cpp
++++ b/src/mesh/eth/ethClient.cpp
+@@ -27,19 +27,25 @@
+ #endif
+ #include <SPI.h>
+ 
++#ifdef RAK3312
++// Dedicated second SPI peripheral for the RAK13800: the shared global `SPI` object is
++// already begin()'d for the LoRa radio and a re-begin() with different pins is a no-op.
++SPIClass EthSPI(HSPI);
++#endif
++
+ #if HAS_NETWORKING && !defined(USE_WS5500) && !defined(USE_CH390D)
+ 
+ #ifndef DISABLE_NTP
+ #include <NTPClient.h>
+ 
+ // NTP
+-EthernetUDP ntpUDP;
+-NTPClient timeClient(ntpUDP, config.network.ntp_server);
++EthernetUDP ethNtpUDP;
++NTPClient ethTimeClient(ethNtpUDP, config.network.ntp_server);
+ uint32_t ntp_renew = 0;
+ #endif
+ 
+-EthernetUDP syslogClient;
+-meshtastic::Syslog syslog(syslogClient);
++EthernetUDP ethSyslogClient;
++meshtastic::Syslog ethSyslog(ethSyslogClient);
+ 
+ bool ethStartupComplete = 0;
+ 
+@@ -64,9 +70,9 @@ static int32_t reconnectETH()
+         if (memcmp(currentMac, expectedMac, 6) != 0) {
+             LOG_WARN("W5100S MAC mismatch (chip reset detected), reinitializing Ethernet");
+ 
+-            syslog.disable();
++            ethSyslog.disable();
+ #if !MESHTASTIC_EXCLUDE_SOCKETAPI
+-            deInitApiServer();
++            deInitEthSocketApiServer();
+ #endif
+ #if HAS_ETHERNET && defined(HAS_ETHERNET_API)
+             // Drop the HTTP/80 listener; the restart path below rebinds it. Without
+@@ -109,6 +115,8 @@ static int32_t reconnectETH()
+             ETH_SPI_PORT.setTX(PIN_SPI0_MOSI);
+             ETH_SPI_PORT.setRX(PIN_SPI0_MISO);
+             ETH_SPI_PORT.begin();
++#elif defined(RAK3312)
++            ETH_SPI_PORT.begin(ETH_SCLK_PIN, ETH_MISO_PIN, ETH_MOSI_PIN, PIN_ETHERNET_SS);
+ #endif
+             Ethernet.init(ETH_SPI_PORT, PIN_ETHERNET_SS);
+ #endif
+@@ -142,7 +150,7 @@ static int32_t reconnectETH()
+ 
+ #ifndef DISABLE_NTP
+             LOG_INFO("Start NTP time client");
+-            timeClient.setUpdateInterval(60 * 60); // Update once an hour
++            ethTimeClient.setUpdateInterval(60 * 60); // Update once an hour
+ #endif
+ 
+             if (config.network.rsyslog_server[0]) {
+@@ -158,16 +166,16 @@ static int32_t reconnectETH()
+                     serverPort = port.toInt();
+                     serverAddr = server.c_str();
+                 }
+-                syslog.server(serverAddr, serverPort);
+-                syslog.deviceHostname(getDeviceName());
+-                syslog.appName("Meshtastic");
+-                syslog.defaultPriority(LOGLEVEL_USER);
+-                syslog.enable();
++                ethSyslog.server(serverAddr, serverPort);
++                ethSyslog.deviceHostname(getDeviceName());
++                ethSyslog.appName("Meshtastic");
++                ethSyslog.defaultPriority(LOGLEVEL_USER);
++                ethSyslog.enable();
+             }
+ 
+ #if !MESHTASTIC_EXCLUDE_SOCKETAPI
+             if (config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
+-                initApiServer();
++                initEthSocketApiServer(SERVER_API_DEFAULT_PORT);
+             }
+ #endif
+ #if HAS_UDP_MULTICAST
+@@ -203,11 +211,11 @@ static int32_t reconnectETH()
+     if (isEthernetAvailable() && (ntp_renew == 0 || Throttle::deadlinePassed(ntp_renew))) {
+ 
+         LOG_INFO("Update NTP time from %s", config.network.ntp_server);
+-        if (timeClient.update()) {
++        if (ethTimeClient.update()) {
+             LOG_DEBUG("NTP Request Success - Set RTCQualityNTP if needed");
+ 
+             struct timeval tv;
+-            tv.tv_sec = timeClient.getEpochTime();
++            tv.tv_sec = ethTimeClient.getEpochTime();
+             tv.tv_usec = 0;
+ 
+             perhapsSetRTC(RTCQualityNTP, &tv);
+@@ -217,7 +225,7 @@ static int32_t reconnectETH()
+             LOG_ERROR("NTP Update failed");
+             ntp_renew = Time::timerEndsAtMillis(300 * 1000); // failure, retry every 5 minutes
+         }
+-        timeClient.end(); // W5100S: release UDP socket for other services
++        ethTimeClient.end(); // W5100S: release UDP socket for other services
+     }
+ #endif
+ 
+@@ -258,6 +266,8 @@ bool initEthernet()
+         ETH_SPI_PORT.setTX(PIN_SPI0_MOSI);
+         ETH_SPI_PORT.setRX(PIN_SPI0_MISO);
+         ETH_SPI_PORT.begin();
++#elif defined(RAK3312)
++        ETH_SPI_PORT.begin(ETH_SCLK_PIN, ETH_MISO_PIN, ETH_MOSI_PIN, PIN_ETHERNET_SS);
+ #endif
+         Ethernet.init(ETH_SPI_PORT, PIN_ETHERNET_SS);
+ #endif
+@@ -323,13 +333,13 @@ bool isEthernetAvailable()
+ {
+ 
+     if (!config.network.eth_enabled) {
+-        syslog.disable();
++        ethSyslog.disable();
+         return false;
+     } else if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+-        syslog.disable();
++        ethSyslog.disable();
+         return false;
+     } else if (Ethernet.linkStatus() == LinkOFF) {
+-        syslog.disable();
++        ethSyslog.disable();
+         return false;
+     } else {
+         return true;
+diff --git a/variants/esp32s3/rak3312/platformio.ini b/variants/esp32s3/rak3312/platformio.ini
+index ca2d702..ee3ca2e 100644
+--- a/variants/esp32s3/rak3312/platformio.ini
++++ b/variants/esp32s3/rak3312/platformio.ini
+@@ -16,11 +16,25 @@ board_level = release
+ board = wiscore_rak3312
+ upload_protocol = esptool
+ 
+-build_flags = 
++build_flags =
+   ${esp32s3_base.build_flags}
+   -D RAK3312
+   -I variants/esp32s3/rak3312
+ 
++custom_sdkconfig =
++  ${esp32s3_base.custom_sdkconfig}
++  CONFIG_ETH_ENABLED=y
++  CONFIG_ARDUINO_SELECTIVE_Ethernet=y
++
++build_src_filter =
++  ${esp32s3_base.build_src_filter}
++  +<mesh/eth/>
++
++lib_deps =
++  ${esp32s3_base.lib_deps}
++  # RAK3312 + RAK13800 (WIZnet W5100S-L) Ethernet gateway support
++  https://github.com/RAKWireless/RAK13800-W5100S/archive/1.0.2.zip
++
+ [env:rak3112]
+ extends = esp32s3_base
+ board = wiscore_rak3312
+diff --git a/variants/esp32s3/rak3312/variant.h b/variants/esp32s3/rak3312/variant.h
+index 3815068..3ddea84 100644
+--- a/variants/esp32s3/rak3312/variant.h
++++ b/variants/esp32s3/rak3312/variant.h
+@@ -55,4 +55,17 @@
+ #define GPS_TX_PIN 43
+ #define GPS_RX_PIN 44
+ 
++// RAK13800 Ethernet module (WIZnet W5100S-L) on the WisBlock IO slot,
++// pins per RAK5005-O/RAK3312/RAK13800 datasheets.
++#define HAS_ETHERNET 1
++#define PIN_ETHERNET_RESET 41 // WB_IO3
++#define PIN_ETHERNET_SS 12    // shared WisBlock SPI_CS
++#define ETH_SCLK_PIN 13       // shared WisBlock SPI_CLK
++#define ETH_MISO_PIN 10       // shared WisBlock SPI_MISO
++#define ETH_MOSI_PIN 11       // shared WisBlock SPI_MOSI
++// Must be a SECOND SPI peripheral, not the shared `SPI` object: that one is already
++// begin()'d for the LoRa radio (pins 5/3/6/7), and ESP32 Arduino's SPIClass::begin()
++// silently no-ops on a second call, so re-pinning it here would not actually move it.
++#define ETH_SPI_PORT EthSPI
++
+ #endif
