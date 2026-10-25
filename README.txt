@@ -4,13 +4,55 @@
 
 Author's note: this patch adds working Ethernet/PoE support to the
 Meshtastic "rak3312" board target, which officially has none. It is based
-on meshtastic/firmware "develop" branch, commit fad52bba0db68aff926aa02a
-55f4d2c4989f68dd (2026-10-17), version string 2.8.2.fad52bb.
+on meshtastic/firmware "develop" branch, commit 95ff510f476e238f60c96d0d
+ebb355b2fba69449 (2026-10-24), version string 2.8.2.326ccb2. It is the
+same change that is proposed upstream as meshtastic/firmware PR #12232.
+
+See section 0 for what changed since the first release (2.8.2.fad52bb).
+Sections 4-11 were written for that first release; where they name the
+`rak3312` env or files, read `rak3312_eth_gw` for the current build.
 
 This is an UNOFFICIAL, community patch. It is not endorsed by, reviewed by,
 or merged into the official Meshtastic project. Use at your own risk. See
 "KNOWN ISSUES" and "WHY THIS ISN'T JUST A PULL REQUEST YET" at the bottom
 before relying on it for anything important.
+
+
+------------------------------------------------------------------------------
+0. WHAT'S NEW IN 2.8.2.326ccb2 (patch set v2.0.0, compared to 2.8.2.fad52bb)
+------------------------------------------------------------------------------
+
+  - SEPARATE BUILD ENV. Ethernet support now lives in its own env
+    `rak3312_eth_gw` (modelled on the official `rak4631_eth_gw`), guarded
+    by RAK3312_ETH_GW. The plain `rak3312` env is untouched upstream code.
+    This is the same change as upstream PR meshtastic/firmware#12232.
+    Build with:  pio run -e rak3312_eth_gw
+
+  - WIFI + ETHERNET AT THE SAME TIME NOW WORKS. On ESP32, getMacAddr()
+    returns the WiFi station MAC, so with WiFi and the RAK13800 both
+    enabled, both interfaces used the same MAC. Ethernet got a DHCP lease
+    but was otherwise unreachable. The Ethernet side now uses the chip's
+    own ESP_MAC_ETH address, which differs from the WiFi MAC. Update
+    any DHCP reservation you made for the old MAC.
+
+  - SYSLOG goes to both the WiFi and the Ethernet syslog client.
+
+  - RAK13800-W5100S library bumped from 1.0.2 to 1.0.4.
+
+  - Rebased onto current develop (95ff510, 2026-10-24).
+
+  - The factory image now really is complete: bootloader, partition
+    table, app AND the LittleFS filesystem at 0x300000, merged into one
+    4 MB file. One write at 0x0 after a full erase is all you need.
+
+  - NOTE: on 2.8.x the node number is always derived from the public key
+    (CRC32) at boot. After a full erase + flash your node ID will change,
+    even if you restore your old config.
+
+Tested on real hardware (RAK3312 + RAK13800 + RAK19018 on RAK5005-O):
+boot, WiFi, NTP, LoRa TX/RX, Ethernet DHCP, API on TCP 4403 over
+Ethernet, syslog over Ethernet, reboot over Ethernet, and PoE-only power
+(no USB) with 180/180 pings over several minutes.
 
 
 ------------------------------------------------------------------------------
@@ -39,18 +81,18 @@ an official `rak4631_eth_gw` board target with working Ethernet.
 2. WHAT'S IN THIS FOLDER
 ------------------------------------------------------------------------------
 
-  firmware-rak3312-ethernet-2.8.2.fad52bb.factory.bin
+  firmware-rak3312_eth_gw-2.8.2.326ccb2.factory.bin
       The complete, ready-to-flash image (bootloader + partition table +
       app + filesystem, merged into one file). Flash this at offset 0x0
       after a full chip erase. This is what most people want.
-      MD5: 9eb3ed702342d64f6be82cad705c1eaa
+      MD5: 35c4038033fc10566c6f7f06d32f6b7a
 
-  firmware-rak3312-ethernet-2.8.2.fad52bb.app-only.bin
+  firmware-rak3312_eth_gw-2.8.2.326ccb2.app-only.bin
       Just the application partition. Use this ONLY if you already have a
       working rak3312 Meshtastic install and just want to update the app
       without touching your existing config/NVS/filesystem. Flash at
       offset 0x10000. Do NOT use this for a first-time flash.
-      MD5: ed8f515e728615db6f8af935ce87ff6b
+      MD5: beee88105458c8a946b9a2e11863602a
 
   rak3312-ethernet.patch
       A `git diff` patch with every source change, against the exact
@@ -76,7 +118,7 @@ an ESP32 LoRa radio without an antenna attached can damage the RF front
 end. Then:
 
   esptool --chip esp32s3 --port COM4 erase-flash
-  esptool --chip esp32s3 --port COM4 write-flash 0x0 firmware-rak3312-ethernet-2.8.2.fad52bb.factory.bin
+  esptool --chip esp32s3 --port COM4 write-flash 0x0 firmware-rak3312_eth_gw-2.8.2.326ccb2.factory.bin
 
 (Replace COM4 with your actual serial port; on Linux/macOS it will be
 something like /dev/ttyACM0 or /dev/cu.usbmodemXXXX.)
@@ -445,13 +487,14 @@ reasons.
 
   git clone https://github.com/meshtastic/firmware meshtastic-firmware
   cd meshtastic-firmware
-  git checkout fad52bba0db68aff926aa02a55f4d2c4989f68dd
+  git checkout 95ff510f476e238f60c96d0debb355b2fba69449
   git apply /path/to/rak3312-ethernet.patch
   pip install -U platformio            # needs PlatformIO Core >= 6.2.0
-  pio run -e rak3312
+  pio run -e rak3312_eth_gw
 
-  Output appears under .pio/build/rak3312/ -- the file you want is
-  firmware-rak3312-<version>.factory.bin
+  Output appears under .pio/build/rak3312_eth_gw/ -- the file you want is
+  firmware-rak3312_eth_gw-<version>.factory.bin (add the littlefs-*.bin
+  at 0x300000, or run `pio run -e rak3312_eth_gw -t uploadfs`)
 
 Notes if you hit problems:
 
@@ -482,6 +525,10 @@ Notes if you hit problems:
 ------------------------------------------------------------------------------
 11. WHY THIS ISN'T JUST A PULL REQUEST YET
 ------------------------------------------------------------------------------
+
+UPDATE 2026-10-24: this is now upstream PR meshtastic/firmware#12232
+(https://github.com/meshtastic/firmware/pull/12232), awaiting review.
+The notes below are kept for context.
 
 Several reasons someone should sanity-check before upstreaming this:
 

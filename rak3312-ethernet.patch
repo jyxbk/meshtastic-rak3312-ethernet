@@ -1,4 +1,54 @@
-﻿diff --git a/src/mesh/api/ethServerAPI.cpp b/src/mesh/api/ethServerAPI.cpp
+diff --git a/src/RedirectablePrint.cpp b/src/RedirectablePrint.cpp
+index 392ca7b..e2a5fa3 100644
+--- a/src/RedirectablePrint.cpp
++++ b/src/RedirectablePrint.cpp
+@@ -18,7 +18,10 @@
+ #endif
+ 
+ #if HAS_NETWORKING
+-extern meshtastic::Syslog syslog;
++// syslog is defined by WiFiAPClient.cpp, ethSyslog by ethClient.cpp. Boards compile one or both
++// network stacks, so both are weak and checked for null before use.
++extern meshtastic::Syslog syslog __attribute__((weak));
++extern meshtastic::Syslog ethSyslog __attribute__((weak));
+ #endif
+ void RedirectablePrint::rpInit()
+ {
+@@ -194,8 +197,10 @@ void RedirectablePrint::log_to_serial(const char *logLevel, const char *format,
+ void RedirectablePrint::log_to_syslog(const char *logLevel, const char *format, va_list arg)
+ {
+ #if HAS_NETWORKING && !defined(ARCH_PORTDUINO)
++    meshtastic::Syslog *wifiLog = (&syslog && syslog.isEnabled()) ? &syslog : nullptr;
++    meshtastic::Syslog *ethLog = (&ethSyslog && ethSyslog.isEnabled()) ? &ethSyslog : nullptr;
+     // if syslog is in use, collect the log messages and send them to syslog
+-    if (syslog.isEnabled()) {
++    if (wifiLog || ethLog) {
+         int ll = 0;
+         switch (logLevel[0]) {
+         case 'D':
+@@ -217,10 +222,17 @@ void RedirectablePrint::log_to_syslog(const char *logLevel, const char *format,
+             ll = 0;
+         }
+         auto thread = concurrency::OSThread::currentThread;
+-        if (thread) {
+-            syslog.vlogf(ll, thread->ThreadName.c_str(), format, arg);
+-        } else {
+-            syslog.vlogf(ll, format, arg);
++        for (meshtastic::Syslog *log : {wifiLog, ethLog}) {
++            if (!log)
++                continue;
++            va_list argCopy;
++            va_copy(argCopy, arg);
++            if (thread) {
++                log->vlogf(ll, thread->ThreadName.c_str(), format, argCopy);
++            } else {
++                log->vlogf(ll, format, argCopy);
++            }
++            va_end(argCopy);
+         }
+     }
+ #endif
+diff --git a/src/mesh/api/ethServerAPI.cpp b/src/mesh/api/ethServerAPI.cpp
 index 953c992..b68f0aa 100644
 --- a/src/mesh/api/ethServerAPI.cpp
 +++ b/src/mesh/api/ethServerAPI.cpp
@@ -37,22 +87,39 @@ index 5e7129a..b793d9a 100644
 +void deInitEthSocketApiServer();
  #endif
 diff --git a/src/mesh/eth/ethClient.cpp b/src/mesh/eth/ethClient.cpp
-index ce26923..e2aada8 100644
+index ce26923..9343043 100644
 --- a/src/mesh/eth/ethClient.cpp
 +++ b/src/mesh/eth/ethClient.cpp
-@@ -27,19 +27,25 @@
+@@ -26,6 +26,28 @@
+ #include <RAK13800_W5100S.h>
  #endif
  #include <SPI.h>
- 
-+#ifdef RAK3312
++#ifdef ARCH_ESP32
++#include <esp_mac.h>
++#endif
++
++// MAC address for the Ethernet interface. On ESP32 boards the default MAC is the WiFi station MAC,
++// so with WiFi and Ethernet enabled at the same time both interfaces would share one MAC and the
++// Ethernet side becomes unreachable. Use the chip's dedicated Ethernet MAC there instead.
++static void getEthMacAddr(uint8_t *mac)
++{
++#ifdef ARCH_ESP32
++    if (esp_read_mac(mac, ESP_MAC_ETH) == ESP_OK)
++        return;
++#endif
++    getMacAddr(mac); // FIXME use the BLE MAC for now...
++    mac[0] &= 0xfe;  // Make sure this is not a multicast MAC
++}
++
++#ifdef RAK3312_ETH_GW
 +// Dedicated second SPI peripheral for the RAK13800: the shared global `SPI` object is
 +// already begin()'d for the LoRa radio and a re-begin() with different pins is a no-op.
 +SPIClass EthSPI(HSPI);
 +#endif
-+
+ 
  #if HAS_NETWORKING && !defined(USE_WS5500) && !defined(USE_CH390D)
  
- #ifndef DISABLE_NTP
+@@ -33,13 +55,13 @@
  #include <NTPClient.h>
  
  // NTP
@@ -70,7 +137,14 @@ index ce26923..e2aada8 100644
  
  bool ethStartupComplete = 0;
  
-@@ -64,9 +70,9 @@ static int32_t reconnectETH()
+@@ -58,15 +80,14 @@ static int32_t reconnectETH()
+         Ethernet.MACAddress(currentMac);
+ 
+         uint8_t expectedMac[6];
+-        getMacAddr(expectedMac);
+-        expectedMac[0] &= 0xfe;
++        getEthMacAddr(expectedMac);
+ 
          if (memcmp(currentMac, expectedMac, 6) != 0) {
              LOG_WARN("W5100S MAC mismatch (chip reset detected), reinitializing Ethernet");
  
@@ -82,16 +156,16 @@ index ce26923..e2aada8 100644
  #endif
  #if HAS_ETHERNET && defined(HAS_ETHERNET_API)
              // Drop the HTTP/80 listener; the restart path below rebinds it. Without
-@@ -109,6 +115,8 @@ static int32_t reconnectETH()
+@@ -109,6 +130,8 @@ static int32_t reconnectETH()
              ETH_SPI_PORT.setTX(PIN_SPI0_MOSI);
              ETH_SPI_PORT.setRX(PIN_SPI0_MISO);
              ETH_SPI_PORT.begin();
-+#elif defined(RAK3312)
++#elif defined(RAK3312_ETH_GW)
 +            ETH_SPI_PORT.begin(ETH_SCLK_PIN, ETH_MISO_PIN, ETH_MOSI_PIN, PIN_ETHERNET_SS);
  #endif
              Ethernet.init(ETH_SPI_PORT, PIN_ETHERNET_SS);
  #endif
-@@ -142,7 +150,7 @@ static int32_t reconnectETH()
+@@ -142,7 +165,7 @@ static int32_t reconnectETH()
  
  #ifndef DISABLE_NTP
              LOG_INFO("Start NTP time client");
@@ -100,7 +174,7 @@ index ce26923..e2aada8 100644
  #endif
  
              if (config.network.rsyslog_server[0]) {
-@@ -158,16 +166,16 @@ static int32_t reconnectETH()
+@@ -158,16 +181,16 @@ static int32_t reconnectETH()
                      serverPort = port.toInt();
                      serverAddr = server.c_str();
                  }
@@ -123,7 +197,7 @@ index ce26923..e2aada8 100644
              }
  #endif
  #if HAS_UDP_MULTICAST
-@@ -203,11 +211,11 @@ static int32_t reconnectETH()
+@@ -203,11 +226,11 @@ static int32_t reconnectETH()
      if (isEthernetAvailable() && (ntp_renew == 0 || Throttle::deadlinePassed(ntp_renew))) {
  
          LOG_INFO("Update NTP time from %s", config.network.ntp_server);
@@ -137,7 +211,7 @@ index ce26923..e2aada8 100644
              tv.tv_usec = 0;
  
              perhapsSetRTC(RTCQualityNTP, &tv);
-@@ -217,7 +225,7 @@ static int32_t reconnectETH()
+@@ -217,7 +240,7 @@ static int32_t reconnectETH()
              LOG_ERROR("NTP Update failed");
              ntp_renew = Time::timerEndsAtMillis(300 * 1000); // failure, retry every 5 minutes
          }
@@ -146,16 +220,26 @@ index ce26923..e2aada8 100644
      }
  #endif
  
-@@ -258,6 +266,8 @@ bool initEthernet()
+@@ -258,6 +281,8 @@ bool initEthernet()
          ETH_SPI_PORT.setTX(PIN_SPI0_MOSI);
          ETH_SPI_PORT.setRX(PIN_SPI0_MISO);
          ETH_SPI_PORT.begin();
-+#elif defined(RAK3312)
++#elif defined(RAK3312_ETH_GW)
 +        ETH_SPI_PORT.begin(ETH_SCLK_PIN, ETH_MISO_PIN, ETH_MOSI_PIN, PIN_ETHERNET_SS);
  #endif
          Ethernet.init(ETH_SPI_PORT, PIN_ETHERNET_SS);
  #endif
-@@ -323,13 +333,13 @@ bool isEthernetAvailable()
+@@ -268,8 +293,7 @@ bool initEthernet()
+ 
+         //        createSSLCert();
+ 
+-        getMacAddr(mac); // FIXME use the BLE MAC for now...
+-        mac[0] &= 0xfe;  // Make sure this is not a multicast MAC
++        getEthMacAddr(mac);
+ 
+         if (config.network.address_mode == meshtastic_Config_NetworkConfig_AddressMode_DHCP) {
+             LOG_INFO("Start Ethernet DHCP");
+@@ -323,13 +347,13 @@ bool isEthernetAvailable()
  {
  
      if (!config.network.eth_enabled) {
@@ -173,19 +257,23 @@ index ce26923..e2aada8 100644
      } else {
          return true;
 diff --git a/variants/esp32s3/rak3312/platformio.ini b/variants/esp32s3/rak3312/platformio.ini
-index ca2d702..ee3ca2e 100644
+index ca2d702..37bfc6f 100644
 --- a/variants/esp32s3/rak3312/platformio.ini
 +++ b/variants/esp32s3/rak3312/platformio.ini
-@@ -16,11 +16,25 @@ board_level = release
- board = wiscore_rak3312
- upload_protocol = esptool
- 
--build_flags = 
-+build_flags =
-   ${esp32s3_base.build_flags}
+@@ -21,6 +21,30 @@ build_flags =
    -D RAK3312
    -I variants/esp32s3/rak3312
  
++; RAK3312 + RAK13800 (WIZnet W5100S-L) Ethernet module, optionally powered via RAK19018 PoE.
++; Separate env (like rak4631_eth_gw) so the plain rak3312 build is unchanged.
++[env:rak3312_eth_gw]
++extends = env:rak3312
++board_level = release
++
++build_flags =
++  ${env:rak3312.build_flags}
++  -D RAK3312_ETH_GW
++
 +custom_sdkconfig =
 +  ${esp32s3_base.custom_sdkconfig}
 +  CONFIG_ETH_ENABLED=y
@@ -197,20 +285,21 @@ index ca2d702..ee3ca2e 100644
 +
 +lib_deps =
 +  ${esp32s3_base.lib_deps}
-+  # RAK3312 + RAK13800 (WIZnet W5100S-L) Ethernet gateway support
-+  https://github.com/RAKWireless/RAK13800-W5100S/archive/1.0.2.zip
++  # renovate: datasource=github-tags depName=RAK13800-W5100S packageName=RAKWireless/RAK13800-W5100S
++  https://github.com/RAKWireless/RAK13800-W5100S/archive/1.0.4.zip
 +
  [env:rak3112]
  extends = esp32s3_base
  board = wiscore_rak3312
 diff --git a/variants/esp32s3/rak3312/variant.h b/variants/esp32s3/rak3312/variant.h
-index 3815068..3ddea84 100644
+index 3815068..589887f 100644
 --- a/variants/esp32s3/rak3312/variant.h
 +++ b/variants/esp32s3/rak3312/variant.h
-@@ -55,4 +55,17 @@
+@@ -55,4 +55,19 @@
  #define GPS_TX_PIN 43
  #define GPS_RX_PIN 44
  
++#ifdef RAK3312_ETH_GW
 +// RAK13800 Ethernet module (WIZnet W5100S-L) on the WisBlock IO slot,
 +// pins per RAK5005-O/RAK3312/RAK13800 datasheets.
 +#define HAS_ETHERNET 1
@@ -223,5 +312,6 @@ index 3815068..3ddea84 100644
 +// begin()'d for the LoRa radio (pins 5/3/6/7), and ESP32 Arduino's SPIClass::begin()
 +// silently no-ops on a second call, so re-pinning it here would not actually move it.
 +#define ETH_SPI_PORT EthSPI
++#endif // RAK3312_ETH_GW
 +
  #endif

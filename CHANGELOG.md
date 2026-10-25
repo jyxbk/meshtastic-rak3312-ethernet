@@ -3,7 +3,22 @@
 All notable changes to this patch set are documented here. This version
 number tracks the *patch/documentation set* in this repo, independent of
 the upstream Meshtastic firmware version it's built against (currently
-`2.8.2.fad52bb` — see README.txt).
+`2.8.2.326ccb2` — see README.txt).
+
+## v2.0.0 — 2026-10-25
+
+- Rebased onto `develop` @ `95ff510f476e238f60c96d0debb355b2fba69449`
+  (2.8.2.326ccb2). Same change as upstream PR
+  [meshtastic/firmware#12232](https://github.com/meshtastic/firmware/pull/12232).
+- **Breaking:** Ethernet support moved into its own env `rak3312_eth_gw`
+  (plain `rak3312` stays stock); binaries renamed accordingly.
+- Fix: WiFi and Ethernet shared the WiFi MAC, so Ethernet was unreachable
+  while WiFi was on. Ethernet now uses the chip's ESP_MAC_ETH address.
+  DHCP reservations for the old MAC need updating.
+- Syslog output goes to both the WiFi and the Ethernet syslog client.
+- RAK13800-W5100S library 1.0.2 → 1.0.4.
+- Factory image now includes the LittleFS filesystem (single write at `0x0`).
+- New release `v2.8.2-326ccb2` with prebuilt binaries.
 
 ## v1.1.0 — 2026-10-18
 
